@@ -43,6 +43,7 @@ from dataset import AudiosetDataset, DistributedWeightedSampler, DistributedSamp
 from timm.models.vision_transformer import PatchEmbed
 
 from torch.utils.data import WeightedRandomSampler
+import random
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE fine-tuning for image classification', add_help=False)
@@ -65,7 +66,7 @@ def get_args_parser():
     # Optimizer parameters
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
                         help='Clip gradient norm (default: None, no clipping)')
-    parser.add_argument('--weight_decay', type=float, default=0.0005,
+    parser.add_argument('--weight_decay', type=float, default=0.0001,
                         help='weight decay (default: 0.05)')
 
     parser.add_argument('--lr', type=float, default=None, metavar='LR',
@@ -143,7 +144,7 @@ def get_args_parser():
                         help='Perform evaluation only')
     parser.add_argument('--dist_eval', action='store_true', default=False,
                         help='Enabling distributed evaluation (recommended during training for faster monitor')
-    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
@@ -159,6 +160,7 @@ def get_args_parser():
 
     # For audioset
     parser.add_argument('--audio_exp', action='store_true', help='audio exp')
+    parser.add_argument("--data_root", type=str, default='', help="prefix for data path")
     parser.add_argument("--data_train", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/train_video.json', help="training data json")
     parser.add_argument("--data_eval", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/eval_video.json', help="validation data json")
     parser.add_argument("--label_csv", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/class_labels_indices.csv', help="csv with class labels")
@@ -240,6 +242,7 @@ def main(args):
     seed = args.seed + misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
+    random.seed(seed)
 
     cudnn.benchmark = True
 
@@ -277,10 +280,12 @@ def main(args):
                       }  
         dataset_train = AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf_train, 
                                         use_fbank=args.use_fbank, fbank_dir=args.fbank_dir, 
-                                        roll_mag_aug=args.roll_mag_aug, load_video=args.load_video, mode='train')
+                                        roll_mag_aug=args.roll_mag_aug, load_video=args.load_video, mode='train',
+                                        data_root=args.data_root)
         dataset_val = AudiosetDataset(args.data_eval, label_csv=args.label_csv, audio_conf=audio_conf_val, 
                                         use_fbank=args.use_fbank, fbank_dir=args.fbank_dir, 
-                                        roll_mag_aug=False, load_video=args.load_video, mode='eval')
+                                        roll_mag_aug=False, load_video=args.load_video, mode='eval',
+                                        data_root=args.data_root)
 
     if True: #args.distributed:
         num_tasks = misc.get_world_size()
@@ -332,6 +337,14 @@ def main(args):
         log_writer = SummaryWriter(log_dir=args.log_dir)
     else:
         log_writer = None
+
+ # write args to log
+    args_dict = vars(args)
+    if global_rank == 0 and args.log_dir is not None:
+        with open(os.path.join(args.log_dir, f"log_{misc.get_rank()}.txt"), mode="a", encoding="utf-8") as f:
+            f.write("Args:\n")
+            for key, value in args_dict.items():
+                f.write(f"{key}: {value}\n")
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -448,7 +461,7 @@ def main(args):
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        test_stats = evaluate(data_loader_val, model, device, args.dist_eval)
+        test_stats = evaluate(data_loader_val, model, device, args.dist_eval, args=args)
         with open('aps.txt', 'w') as fp:
             aps=test_stats['AP']
             aps=[str(ap) for ap in aps]
@@ -458,7 +471,8 @@ def main(args):
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    max_mAP = 0.0
+    best_mAP = 0.0
+    best_epoch = (args.first_eval_ep-1) if (args.first_eval_ep-1) > 0 else 0
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
@@ -484,10 +498,12 @@ def main(args):
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
         if epoch >= args.first_eval_ep:
-            test_stats = evaluate(data_loader_val, model, device, args.dist_eval)
+            test_stats = evaluate(data_loader_val, model, device, args.dist_eval, args=args)
             print(f"mAP of the network on the {len(dataset_val)} test images: {test_stats['mAP']:.4f}")
-            max_mAP = max(max_mAP, test_stats["mAP"])
-            print(f'Max mAP: {max_mAP:.4f}')
+            if test_stats["mAP"] > best_mAP:
+                best_mAP = test_stats["mAP"]
+                best_epoch = epoch
+            print(f'best Epoch: {int(best_epoch)} | best mAP: {best_mAP:.4f}')
         else:
             test_stats ={'mAP': 0.0}
             print(f'too new to evaluate!')
@@ -503,8 +519,12 @@ def main(args):
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+            with open(os.path.join(args.output_dir, f"log_{misc.get_rank()}.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+    if args.output_dir and misc.is_main_process():
+        with open(os.path.join(args.output_dir, f"log_{misc.get_rank()}.txt"), mode="a", encoding="utf-8") as f:
+            f.write(f"Best Epoch: {int(best_epoch)} | best mAP: {best_mAP:.4f}\n")
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

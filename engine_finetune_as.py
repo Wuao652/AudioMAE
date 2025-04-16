@@ -9,6 +9,7 @@
 # BEiT: https://github.com/microsoft/unilm/tree/master/beit
 # --------------------------------------------------------
 
+import os
 import math
 import sys
 from typing import Iterable, Optional
@@ -95,7 +96,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, dist_eval=False):
+def evaluate(data_loader, model, device, dist_eval=False, args=None):
     criterion = torch.nn.BCEWithLogitsLoss()
 
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -130,12 +131,13 @@ def evaluate(data_loader, model, device, dist_eval=False):
     outputs=torch.cat(outputs).cpu().numpy()
     targets=torch.cat(targets).cpu().numpy()
     vids = [j for sub in vids for j in sub]
-    np.save('inf_output.npy', {'vids':vids, 'embs_527':outputs, 'targets':targets})
+    np.save(os.path.join(args.output_dir, 'inf_output.npy'), {'vids':vids, 'embs_527':outputs, 'targets':targets})
     stats = calculate_stats(outputs, targets)
 
     AP = [stat['AP'] for stat in stats]
     mAP = np.mean([stat['AP'] for stat in stats])
     print("mAP: {:.6f}".format(mAP))
-    return {"mAP": mAP, "AP": AP}
-
+    # return {"mAP": mAP, "AP": AP}
+    # simplify the return value
+    return {"mAP": mAP}
 
