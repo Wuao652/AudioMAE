@@ -22,6 +22,11 @@ from util.misc import concat_all_gather
 from util.patch_embed import PatchEmbed_new, PatchEmbed_org
 from timm.models.swin_transformer import SwinTransformerBlock
 
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import cv2
+
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
@@ -423,6 +428,95 @@ class MaskedAutoencoderViT(nn.Module):
         loss_contrastive = torch.FloatTensor([0.0]).cuda()
         return loss_recon, pred, mask, loss_contrastive
 
+
+    def save_image(self, img, save_path, mask=None):
+        if type(img) == torch.Tensor:
+            img = img.clone().detach().cpu().numpy()
+        if os.path.exists(save_path):
+            return 
+
+        img = img*4.5689974*2-4.2677393
+        # print(img.shape, img.min(), img.max())
+        # img = (img - img.min())/(img.max() - img.min() + 1e-7) * 255
+        # clip image betweeen 0 and 1
+        img = 255*np.clip(img, 0, 1)
+        img = 255 - np.uint8(img)
+        if mask is not None:
+            img = img * mask.numpy()
+        # img = img[0, ...]
+        img = img.T
+        img = img[::-1, ...]
+
+        cv2.imwrite(save_path, img)
+
+
+    def save_spectrogram(self, spectrogram, title=None, save_path=None, dpi=300):
+        # print(spectrogram.shape, spectrogram.dtype, spectrogram.device)
+        # convert to numpy
+        if isinstance(spectrogram, torch.Tensor):
+            spectrogram = spectrogram.clone().detach().cpu().numpy()
+        assert isinstance(spectrogram, np.ndarray)
+        # check if spectrogram is np.uint8
+        if spectrogram.dtype != np.uint8:
+            spectrogram = spectrogram * (4.5689974*2) - 4.2677393
+            spectrogram_min, spectrogram_max = spectrogram.min(), spectrogram.max()
+            spectrogram = (spectrogram - spectrogram_min) / (spectrogram_max - spectrogram_min + 1e-7) * 255.0
+            # spectrogram = spectrogram * (4.5689974*2) - 4.2677393
+            # spectrogram = np.clip(spectrogram, 0.0, 1.0) * 255.0
+            spectrogram = spectrogram.astype(np.uint8)
+        # transpose spectrogram
+        spectrogram = spectrogram.T
+        spectrogram = spectrogram[::-1, :]  # flip vertically
+        plt.figure(figsize=(spectrogram.shape[1] / dpi, spectrogram.shape[0] / dpi), dpi=dpi)  # Ensure dimensions match
+        # plt.figure(figsize=(20, 4))
+        plt.imshow(spectrogram, cmap='Greys', aspect='equal', vmin=0, vmax=255)
+        # set axis off
+        plt.axis('off')
+        plt.subplots_adjust(left=0, right=1, top=1, bottom=0)  # Remove whitespace
+        if title is not None:
+            plt.title(title)
+        if save_path is not None:
+            plt.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
+        plt.close()
+
+
+    def dump_reconstructions(self, imgs, mask_ratio=0.8, img_names=None, save_dir=None):
+        print("Rank 0 model starts to dump reconstructions ...")
+
+        _, y, mask, _ = self.forward(imgs, mask_ratio=mask_ratio)
+        # y:  [B, 512, 256] 512=(h//p)*(w//p), 256=p*p*1 
+        # mask:  [B, 512]
+        # imgs:  [B, 1, 1024, 128]
+
+        y = self.unpatchify(y)  # [B, 1, 1024, 128]      
+        y = torch.einsum('nchw->nhwc', y)  # [B, 1024, 128, 1]
+
+        mask = mask.unsqueeze(-1).repeat(1, 1, self.patch_embed.patch_size[0]**2 *1)  # [B, 512, 256]
+        mask = self.unpatchify(mask)  # [B, 1, 1024, 128]  
+        mask = torch.einsum('nchw->nhwc', mask)  # [B, 1024, 128, 1]
+        
+        x = torch.einsum('nchw->nhwc', imgs)  # [B, 1024, 128, 1]
+        
+        # high value for masked area, more black
+        im_masked = x * (1.0 - mask) + mask * x.max()
+
+        for img_id, img_name in enumerate(img_names):
+            x_save_path = os.path.join(save_dir, img_name.replace('.wav', '_orig.jpg'))
+            y_save_path = os.path.join(save_dir, img_name.replace('.wav', '_recon.jpg'))
+            im_masked_save_path = os.path.join(save_dir, img_name.replace('.wav', '_masked.jpg'))
+
+            # print(img_name)
+            # print("x_save_path: ", x_save_path)
+            # print("y_save_path: ", y_save_path)
+            # print("im_masked_save_path: ", im_masked_save_path)
+            
+            self.save_spectrogram(spectrogram=x[img_id].squeeze(-1), save_path=x_save_path)
+            self.save_spectrogram(spectrogram=y[img_id].squeeze(-1), save_path=y_save_path)
+            self.save_spectrogram(spectrogram=im_masked[img_id].squeeze(-1), save_path=im_masked_save_path)
+            # self.save_image(img=x[img_id].squeeze(-1), save_path=x_save_path)
+            # self.save_image(img=y[img_id].squeeze(-1), save_path=y_save_path)
+            # self.save_image(img=im_masked[img_id].squeeze(-1), save_path=im_masked_save_path)
+    
 
 def mae_vit_small_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(

@@ -33,8 +33,15 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models_mae
 
-from engine_pretrain import train_one_epoch
+from engine_pretrain import train_one_epoch, evaluate
 from dataset import AudiosetDataset
+
+import random
+# for debugging
+import sys
+import ipdb
+from IPython import embed as e
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
@@ -57,7 +64,8 @@ def get_args_parser():
     #parser.add_argument('--norm_pix_loss', action='store_true',
     #                    help='Use (per-patch) normalized pixels as targets for computing loss')
     parser.add_argument('--norm_pix_loss', type=bool, default=False, help='Use (per-patch) normalized pixels as targets for computing loss')
-    
+    parser.add_argument('--no_norm_pix', action='store_true', default=False, help='Not use norm_pix_loss')
+
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -108,6 +116,7 @@ def get_args_parser():
     parser.add_argument('--audio_exp', type=bool, default=True, help='audio exp')
     #parser.add_argument("--data_train", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/train.json', help="training data json")
     #parser.add_argument("--data_eval", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/eval.json', help="validation data json")
+    parser.add_argument("--data_root", type=str, default=None, help="data root to load waveforms")
     parser.add_argument("--data_train", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/train_video.json', help="training data json")
     parser.add_argument("--data_eval", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/eval_video.json', help="validation data json")    
     parser.add_argument("--label_csv", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/class_labels_indices.csv', help="csv with class labels")
@@ -142,12 +151,15 @@ def get_args_parser():
     parser.set_defaults(audio_exp=True)
     parser.add_argument('--no_shift', type=bool, default=False, help='no_shift')
 
+    parser.add_argument('--eval_freq', type=int, default=5, help='eval_freq')
+
     # set norm_pix_loss=True for normal training, norm_pix_loss=False for visualization
-    parser.set_defaults(norm_pix_loss=True)
+    # parser.set_defaults(norm_pix_loss=True)
     return parser
 
 
 def main(args):
+    args.norm_pix_loss = not args.no_norm_pix
     misc.init_distributed_mode(args)
     print('======================= starting pretrain =======================')
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
@@ -159,6 +171,7 @@ def main(args):
     seed = args.seed + misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
+    random.seed(seed)
 
     cudnn.benchmark = True
 
@@ -176,9 +189,9 @@ def main(args):
         multilabel_dataset = {'audioset': True, 'esc50': False, 'k400': False, 'speechcommands': True}
         audio_conf = {'num_mel_bins': 128, 
                       'target_length': target_length[args.dataset], 
-                      'freqm': args.freqm,
-                      'timem': args.timem,
-                      'mixup': args.mixup,
+                      'freqm': args.freqm,  # 0
+                      'timem': args.timem,  # 0
+                      'mixup': args.mixup,  # 0
                       'dataset': args.dataset,
                       'mode':'train',
                       'mean':norm_stats[args.dataset][0],
@@ -186,7 +199,11 @@ def main(args):
                       'multilabel':multilabel_dataset[args.dataset],
                       'noise':False}
         dataset_train = AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, roll_mag_aug=args.roll_mag_aug,
-                                        load_video=args.load_video)
+                                        load_video=args.load_video,
+                                        data_root=args.data_root)
+        dataset_eval = AudiosetDataset(args.data_eval, label_csv=args.label_csv, audio_conf=audio_conf, roll_mag_aug=args.roll_mag_aug,
+                                       load_video=args.load_video,
+                                       data_root=args.data_root)
     #print(dataset_train)
 
     if True:  # args.distributed:
@@ -195,15 +212,30 @@ def main(args):
         sampler_train = torch.utils.data.DistributedSampler(
             dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
         )
+        sampler_eval = torch.utils.data.DistributedSampler(
+            dataset_eval, num_replicas=num_tasks, rank=global_rank, shuffle=False
+        )
         print("Sampler_train = %s" % str(sampler_train))
+        print("Sampler_eval = %s" % str(sampler_eval))
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_eval = torch.utils.data.SequentialSampler(dataset_eval)
+        print("Sampler_train = %s" % str(sampler_train))
+        print("Sampler_eval = %s" % str(sampler_eval))
 
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
         log_writer = SummaryWriter(log_dir=args.log_dir)
     else:
         log_writer = None
+
+    # write args to log
+    args_dict = vars(args)
+    if global_rank == 0 and args.log_dir is not None:
+        with open(os.path.join(args.log_dir, f"log_{misc.get_rank()}.txt"), mode="a", encoding="utf-8") as f:
+            f.write("Args:\n")
+            for key, value in args_dict.items():
+                f.write(f"{key}: {value}\n")
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -213,6 +245,14 @@ def main(args):
         drop_last=True,
     )
     
+    data_loader_eval = torch.utils.data.DataLoader(
+        dataset_eval, sampler=sampler_eval,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
+
     # define the model
     if args.audio_exp:
         model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, 	
@@ -247,7 +287,7 @@ def main(args):
 
     if args.distributed:
         print('use distributed!!')
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     
     # following timm: set wd as 0 for bias and norm layers
@@ -269,10 +309,27 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir and (epoch % args.save_every_epoch == 0 or epoch + 1 == args.epochs):
+        if args.output_dir and ((epoch + 1) % args.save_every_epoch == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
+
+        if args.eval_freq > 0 and ((epoch + 1) % args.eval_freq == 0 or epoch + 1 == args.epochs):
+            evaluate(
+                model,
+                data_loader=data_loader_train,
+                device=device,
+                args=args,
+                save_root=os.path.join(args.output_dir, "reconstructions", "train", "epoch_{}".format(epoch)), 
+            )
+            evaluate(
+                model,
+                data_loader=data_loader_eval,
+                device=device,
+                args=args,
+                save_root=os.path.join(args.output_dir, "reconstructions", "eval", "epoch_{}".format(epoch)),
+            )
+
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         'epoch': epoch,}
@@ -280,7 +337,7 @@ def main(args):
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+            with open(os.path.join(args.output_dir, f"log_{misc.get_rank()}.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
     total_time = time.time() - start_time

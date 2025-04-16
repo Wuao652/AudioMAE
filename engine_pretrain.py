@@ -16,6 +16,7 @@ import torch
 
 import util.misc as misc
 import util.lr_sched as lr_sched
+import os
 
 
 def train_one_epoch(model: torch.nn.Module,
@@ -57,6 +58,12 @@ def train_one_epoch(model: torch.nn.Module,
         #     print(parameter_count_table(model))
 
 
+        # # print and see the shape of the samples
+        # with open(os.path.join(args.log_dir, f"log_{misc.get_rank()}.txt"), mode="a", encoding="utf-8") as f:
+        #     f.write("train samples: \n")
+        #     f.write(f"{samples.shape}, {samples.dtype}, {samples.device} \n")
+        #     [f.write(_v + "\n") for _v in _vids]
+        
         with torch.cuda.amp.autocast():
             loss_a, _, _, _ = model(samples, mask_ratio=args.mask_ratio)
         loss_value = loss_a.item()
@@ -97,3 +104,31 @@ def train_one_epoch(model: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+@torch.no_grad()
+def evaluate(model, data_loader, device, args=None, save_root=None):
+
+    # write to log file
+    if misc.is_main_process() and args.log_dir is not None:
+        with open(os.path.join(args.log_dir, f"log_{misc.get_rank()}.txt"), mode="a", encoding="utf-8") as f:
+            f.write("Started to evaluate!!!\n")
+
+    model.eval()
+    os.makedirs(save_root, exist_ok=True)
+    metric_logger = misc.MetricLogger(delimiter="  ")
+    header = 'Test: '
+    print_freq = 1
+    num_N = 4
+    for data_iter_step, (samples, _labels, vids) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        vids = ["_".join(vid.split("/")[-2:]) for vid in vids]
+        # print("correct vids:\n", vids)
+        
+        samples = samples.to(device, non_blocking=True)
+        if misc.get_rank() == 0:
+            with torch.cuda.amp.autocast():
+                model.module.dump_reconstructions(samples, args.mask_ratio, vids, save_root)
+
+        # Synchronize all processes
+        torch.distributed.barrier()
+        # early stopping 
+        if data_iter_step >= num_N:
+            break

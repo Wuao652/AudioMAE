@@ -126,7 +126,7 @@ def lookup_list(index_list, label_csv):
     return label_list
 
 class AudiosetDataset(Dataset):
-    def __init__(self, dataset_json_file, audio_conf, label_csv=None, use_fbank=False, fbank_dir=None, roll_mag_aug=False, load_video=False, mode='train'):
+    def __init__(self, dataset_json_file, audio_conf, label_csv=None, use_fbank=False, fbank_dir=None, roll_mag_aug=False, load_video=False, mode='train', data_root=None):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
@@ -139,6 +139,14 @@ class AudiosetDataset(Dataset):
         self.fbank_dir = fbank_dir
 
         self.data = data_json['data']
+        # add prefix to wav
+        self.data_root = data_root
+        for d in self.data:
+            d['wav'] = os.path.join(self.data_root, d['wav'])
+        
+        # # [delete me] speed up training to debug evaluation
+        # self.data = self.data[:16384]
+        
         self.audio_conf = audio_conf
         print('---------------the {:s} dataloader---------------'.format(self.audio_conf.get('mode')))
         if 'multilabel' in self.audio_conf.keys():
