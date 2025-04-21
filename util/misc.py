@@ -18,8 +18,10 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from torch._six import inf
+# torch._six is deprecated and removed in torch 1.10+
+# from torch._six import inf
 
+inf = float('inf')
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -321,7 +323,7 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
         model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):

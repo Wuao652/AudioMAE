@@ -25,6 +25,12 @@ This repo hosts the code and models of "[Masked Autoencoders that Listen](http:/
 ```
 source path_to_env/bin/activate
 ```
+### 1.1 Wuao's Installation
+Instead of the previous *mae* conda env, which is proved to work well running python scripts, I create a new conda env and name it as *audiomae*. I hope that I could upgrade pytorch version and see a more stable performance of torchrun. The following is what I have done:
+
+```
+# ok cool!
+```
 
 ### 2. Prepare data:
 Please download AudioSet at [here](https://research.google.com/audioset/). Due to copyright we cannot release the data. The data annotation json parased and used in this work is available [here](https://drive.google.com/file/d/1cAiaL69HFm1zSW4hqFQpdhNfHiVKBFNA/view?usp=share_link). The format follows the one in [AST](https://github.com/YuanGongND/ast). Please be sure to modify the path in the scripts accordingly to reflect your own setup.
