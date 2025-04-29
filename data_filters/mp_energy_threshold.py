@@ -24,7 +24,7 @@ parser.add_argument(
     "--mel_dir", type=str, default="/scratch3/workspace/wuaoliu_umass_edu-inat_sounds/data/inatsounds_new_spec"
 )
 parser.add_argument(
-    "--output_dir", type=str, default="/scratch3/workspace/wuaoliu_umass_edu-inat_sounds/data/inatsounds_high_energy"
+    "--output_dir", type=str, default="/scratch3/workspace/wuaoliu_umass_edu-inat_sounds/data/inatsounds_energy_threshold"
 )
 parser.add_argument(
     "--data_split", type=str, default="train", help="train, val, test"
@@ -38,6 +38,7 @@ parser.add_argument(
 parser.add_argument(
     "--dump_json_only", action="store_true", default=False, help="dump json files only"
 )
+# parser.set_defaults(dump_json_only=True)
 args = parser.parse_args()
 # dump_json_only = True
 args.json_path = osp.join(args.dataset_dir, f"{args.data_split}.json")
@@ -201,7 +202,7 @@ def main():
     for i, au in enumerate(audio):
         all_audio_names.append(au["file_name"])
     # print(all_audio_names[:5])
-    all_audio_names = all_audio_names[:128]
+    # all_audio_names = all_audio_names[:128]
 
     # all_audio_names = [
     #     "train/00241_Animalia_Arthropoda_Insecta_Hemiptera_Cicadidae_Notopsalta_sericea/bd20bebd-6d3b-4c19-bdb2-078c615f20a9.wav",
@@ -231,11 +232,49 @@ def main():
     for p in processes:
         p.join()
 
+def dump_filtered_json():
+    print("hello world from dump filtered json ...")
+    print("args:\n", vars(args))
+
+    filtered_json_path = None
+
+    with open(args.json_path, "r") as f:
+        data = json.load(f)
+    print(data.keys())
+    filtered_data = dict()
+    filtered_data["info"] = data["info"]
+    filtered_data["categories"] = data["categories"]
+    filtered_data["licenses"] = data["licenses"]
+    filtered_data["audio"] = []
+    filtered_data["annotations"] = []
+    print(len(data["categories"]))
+    print(data["categories"][0])
+
+    # info, categories, audio, annotations, licenses
+    print("number of audio files: ", len(data["audio"]))
+    keep_audio_ids = []
+    for au in data["audio"]:
+        # print("=" * 40)
+        # print(au)
+        id = au["id"]
+        file_name = au["file_name"]
+        # check if the file exists
+        np_path = osp.join(args.output_dir, file_name.replace(".wav", ".npy"))
+        if osp.exists(np_path):
+            keep_audio_ids.append(id)
+            filtered_data["audio"].append(au)
+    print("number of keep audio files: ", len(filtered_data["audio"]))
+    print(len(keep_audio_ids))
+    sys.exit(0)
+
+    # Check
+
+
 
 
 if __name__ == "__main__":
     if args.dump_json_only:
-        print("dump_json_files ... ")
+        dump_filtered_json()
     else:
         # Use energy threshold to filter out the high quality data:
         # save the high quality data
