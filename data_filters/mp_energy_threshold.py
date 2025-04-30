@@ -87,12 +87,17 @@ def energy_thresholding(wav_path, mel_path, np_path, vis_path, stat_dict_path=No
     # sample rate is 22050
     sr, waveform = scipy.io.wavfile.read(wav_path)
     wav_length = waveform.shape[0]
+    if wav_length <= 0:
+        file_name = "/".join(wav_path.split("/")[-3:])
+        print(f"Empty audio file found in : {file_name} ...")
+        return None
     if waveform.dtype == np.int16:
         waveform = waveform.astype(np.float32) / 32768.0   
     # peak normalization
     # according to the following:
     # https://en.wikipedia.org/wiki/Audio_normalization
-    waveform = waveform / np.max(np.abs(waveform))
+    # Not divided by zero
+    waveform = waveform / (np.max(np.abs(waveform)) + 1e-8)
     img_np, img_frames, idx_turples = read_sound(mel_path)
     img_keep = np.zeros_like(img_np)
     w_keep = []
@@ -143,7 +148,7 @@ def energy_thresholding(wav_path, mel_path, np_path, vis_path, stat_dict_path=No
             json.dump(stat_dict, f, indent=2)
     
     if len(w_keep) == 0:
-        print(f"No energy above threshold in : {stat_dict['file_name']}")
+        print(f"No clip is found above threshold in : {stat_dict['file_name']}")
         return stat_dict
     
     w_keep = list(set(w_keep))
@@ -235,8 +240,10 @@ def main():
 def dump_filtered_json():
     print("hello world from dump filtered json ...")
     print("args:\n", vars(args))
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    filtered_json_path = None
+    # path to filtered json file
+    filtered_json_path = osp.join(args.output_dir, f"{args.data_split}.json")
 
     with open(args.json_path, "r") as f:
         data = json.load(f)
@@ -263,13 +270,22 @@ def dump_filtered_json():
         if osp.exists(np_path):
             keep_audio_ids.append(id)
             filtered_data["audio"].append(au)
+    keep_audio_ids.sort()
+    print("length of keep audio ids: ", len(keep_audio_ids))
+    # print("keep audio ids:\n", keep_audio_ids)
     print("number of keep audio files: ", len(filtered_data["audio"]))
-    print(len(keep_audio_ids))
-    sys.exit(0)
-
-    # Check
-
-
+    
+    for anno in data["annotations"]:
+        audio_id = anno["audio_id"]
+        category_id = anno["category_id"]
+        if audio_id in keep_audio_ids:
+            filtered_data["annotations"].append(anno)
+    print("number of annotations: ", len(filtered_data["annotations"]))
+    
+    # dump the filtered json
+    with open(filtered_json_path, "w") as f:
+        json.dump(filtered_data, f, indent=2)
+    print(f"filtered json file save to {filtered_json_path} ...")
 
 
 if __name__ == "__main__":
